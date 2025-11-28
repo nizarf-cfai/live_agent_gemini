@@ -14,7 +14,7 @@ from google.genai.types import EmbedContentConfig
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-
+import canvas_ops
 load_dotenv()
 
 # Configuration
@@ -34,8 +34,14 @@ client = genai.Client(
 
 def load_board_items(file_path: str = "output/board_items.json") -> List[Dict[str, Any]]:
     """Load board items from JSON file."""
-    with open(file_path, "r", encoding="utf-8") as f:
+
+    try:
+        return canvas_ops.get_board_items()
+    except Exception as e:
+        print(f"Error loading board items: {e}")
+        with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
+    
 
 
 def compute_item_hash(item: Dict[str, Any]) -> str:
@@ -67,64 +73,48 @@ def load_index(file_path: str = INDEX_CACHE_PATH) -> Optional[pd.DataFrame]:
     return None
 
 
+def extract_text_recursive(obj: Any, parent_key: str = "") -> List[str]:
+    """
+    Recursively extract text from nested dictionaries and lists.
+    Returns a list of strings in format 'key: value'.
+    """
+    texts = []
+    
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            # Skip certain keys that don't add value
+            if key in ['x', 'y', 'width', 'height', 'color', 'rotation', 'createdAt', 'updatedAt']:
+                continue
+            
+            # Create a readable key path
+            full_key = f"{parent_key}.{key}" if parent_key else key
+            
+            if isinstance(value, (dict, list)):
+                # Recurse into nested structures
+                texts.extend(extract_text_recursive(value, full_key))
+            elif value is not None and str(value).strip():
+                # Add leaf values
+                texts.append(f"{full_key}: {value}")
+    
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            if isinstance(item, (dict, list)):
+                texts.extend(extract_text_recursive(item, parent_key))
+            elif item is not None and str(item).strip():
+                texts.append(f"{parent_key}: {item}")
+    
+    return texts
+
+
 def extract_searchable_text(item: Dict[str, Any]) -> str:
     """
-    Extract searchable text from a board item.
-    Combines description, content, and relevant metadata.
+    Extract searchable text from a board item by recursively extracting all key-value pairs.
     """
-    parts = []
+    # Extract all text recursively
+    text_parts = extract_text_recursive(item)
     
-    # Add description (it's a string)
-    description = item.get("description", "")
-    if description and isinstance(description, str):
-        # Clean up the description - remove extra quotes if present
-        description = description.strip("'\"")
-        parts.append(f"Description: {description}")
-    
-    # Add component type
-    if item.get("componentType"):
-        parts.append(f"Component: {item['componentType']}")
-    
-    # Add title from content
-    content = item.get("content")
-    if content and isinstance(content, dict):
-        if content.get("title"):
-            parts.append(f"Title: {content['title']}")
-    
-        # Extract specific content based on component type
-        component_type = item.get("componentType", "")
-        props = content.get("props", {})
-        
-        if component_type == "PatientContext":
-            patient_data = props.get("patientData", {})
-            patient = patient_data.get("patient", {})
-            parts.append(f"Patient: {patient.get('name', '')} (MRN: {patient.get('identifiers', {}).get('mrn', '')})")
-            parts.append(f"Primary Diagnosis: {patient_data.get('primaryDiagnosis', '')}")
-            parts.append(f"Risk Level: {patient_data.get('riskLevel', '')}")
-            
-            # Add problem list
-            for problem in patient_data.get("problem_list", []):
-                parts.append(f"Problem: {problem.get('name', '')} - {problem.get('status', '')}")
-            
-            # Add medications
-            for med in patient_data.get("medication_timeline", []):
-                parts.append(f"Medication: {med.get('name', '')} {med.get('dose', '')} {med.get('frequency', '')}")
-        
-        elif component_type == "LabTable" or component_type == "LabChart":
-            for lab in props.get("labResults", []):
-                parts.append(f"Lab: {lab.get('name', '')} = {lab.get('value', '')} {lab.get('unit', '')} (Status: {lab.get('status', '')})")
-        
-        elif component_type == "AdverseEventAnalytics":
-            for event in props.get("patientData", {}).get("adverseEvents", []):
-                parts.append(f"Adverse Event: {event.get('event', '')} - Severity: {event.get('severity', '')} - {event.get('description', '')}")
-        
-        elif component_type == "SingleEncounterDocument":
-            encounter = props.get("encounter", {})
-            parts.append(f"Chief Complaint: {encounter.get('chief_complaint', '')}")
-            parts.append(f"Assessment: {encounter.get('assessment', {}).get('impression', '')}")
-            parts.append(f"HPI: {encounter.get('hpi', '')}")
-    
-    return " | ".join(parts)
+    # Join with separator
+    return " | ".join(text_parts)
 
 
 def get_embeddings(text: str, output_dim: int = EMBEDDING_DIM) -> Optional[List[float]]:
@@ -178,6 +168,7 @@ def build_index(board_items: List[Dict[str, Any]], existing_index: Optional[pd.D
         searchable_text = extract_searchable_text(item)
         
         if not searchable_text.strip():
+            print("skipping empty", item_id)
             continue
         
         # Check if item exists and hasn't changed
@@ -317,9 +308,14 @@ def query_rag(query: str, index_df: pd.DataFrame, top_k: int = 3, return_raw: bo
     if return_raw:
         return results
     
-    context = format_context_for_llm(results)
-    return context
+    # context = format_context_for_llm(results)
+    return results
 
+
+def run_rag(query,top_k=2):
+    index = initialize_rag()
+    results = query_rag(query, index, top_k=top_k, return_raw=True)
+    return results
 
 # Example usage
 if __name__ == "__main__":
@@ -334,8 +330,6 @@ if __name__ == "__main__":
     # Example queries
     test_queries = [
         "Give me summary of the patient",
-        "What are the lab results?",
-        "Tell me about adverse events"
     ]
     
     for query in test_queries:
@@ -346,4 +340,5 @@ if __name__ == "__main__":
         for i, result in enumerate(results, 1):
             print(f"\n[Result {i}] (Relevance: {result['similarity']:.3f})")
             print(f"ID: {result['id']}")
-            print(f"Text: {result['text'][:200]}...")
+            with open("output/rag_results.json", "w") as f:
+                json.dump(results, f, indent=4)

@@ -16,7 +16,7 @@ print("#### chroma_script.py CANVAS_URL : ", BASE_URL)
 
 
 def board_items_process(data):
-    exclude_keys = ["x","y","width","height","createdAt","updatedAt","color","rotation"]
+    exclude_keys = ["x","y","width","height","createdAt","updatedAt","color","rotation", "draggable"]
     clean_data = []
     for item in data:
         if item.get('type') == 'ehrHub' or item.get('type') == 'zone' or item.get('type') == 'button':
